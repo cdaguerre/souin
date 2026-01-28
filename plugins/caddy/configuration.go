@@ -60,6 +60,8 @@ type DefaultCache struct {
 	Stale configurationtypes.Duration `json:"stale"`
 	// Disable the coalescing system.
 	DisableCoalescing bool `json:"disable_coalescing"`
+	// Interval between each mapping eviction run.
+	MappingEvictionInterval configurationtypes.Duration `json:"mapping_eviction_interval"`
 }
 
 // GetAllowedHTTPVerbs returns the allowed verbs to cache
@@ -180,6 +182,14 @@ func (d *DefaultCache) GetMaxBodyBytes() uint64 {
 // IsCoalescingDisable returns if the coalescing is disabled
 func (d *DefaultCache) IsCoalescingDisable() bool {
 	return d.DisableCoalescing
+}
+
+// GetMappingEvictionInterval returns the interval for mapping eviction
+func (d *DefaultCache) GetMappingEvictionInterval() time.Duration {
+	if d.MappingEvictionInterval.Duration == 0 {
+		return time.Minute
+	}
+	return d.MappingEvictionInterval.Duration
 }
 
 // Configuration holder
@@ -760,6 +770,12 @@ func parseConfiguration(cfg *Configuration, h *caddyfile.Dispenser, isGlobal boo
 				ttl, err := time.ParseDuration(args[0])
 				if err == nil {
 					cfg.DefaultCache.TTL.Duration = ttl
+				}
+			case "mapping_eviction_interval":
+				args := h.RemainingArgs()
+				mappingEvictionInterval, err := time.ParseDuration(args[0])
+				if err == nil {
+					cfg.DefaultCache.MappingEvictionInterval.Duration = mappingEvictionInterval
 				}
 			case "disable_coalescing":
 				cfg.DefaultCache.DisableCoalescing = true
