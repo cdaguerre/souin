@@ -50,14 +50,14 @@ func reorderStorers(storers []types.Storer, expectedStorers []string) []types.St
 	return newStorers
 }
 
-func registerMappingKeysEviction(logger core.Logger, storers []types.Storer) {
+func registerMappingKeysEviction(logger core.Logger, storers []types.Storer, interval time.Duration) {
 	for _, storer := range storers {
-		logger.Debugf("registering mapping eviction for storer %s", storer.Name())
+		logger.Debugf("registering mapping eviction for storer %s (interval: %s)", storer.Name(), interval)
 		go func(current types.Storer) {
 			for {
 				logger.Debugf("run mapping eviction for storer %s", current.Name())
-
 				api.EvictMapping(current)
+				<-time.After(interval)
 			}
 		}(storer)
 	}
@@ -151,7 +151,7 @@ func NewHTTPCacheHandler(c configurationtypes.AbstractConfigurationInterface) *S
 	}
 	c.GetLogger().Info("Souin configuration is now loaded.")
 
-	registerMappingKeysEviction(c.GetLogger(), storers)
+	registerMappingKeysEviction(c.GetLogger(), storers, c.GetDefaultCache().GetMappingEvictionInterval())
 
 	return &SouinBaseHandler{
 		Configuration:            c,
