@@ -189,6 +189,14 @@ func (d *DefaultCache) IsCoalescingDisable() bool {
 	return d.DisableCoalescing
 }
 
+// GetMappingEvictionInterval returns the interval for mapping eviction
+func (d *DefaultCache) GetMappingEvictionInterval() time.Duration {
+	if d.MappingEvictionInterval.Duration == 0 {
+		return time.Minute
+	}
+	return d.MappingEvictionInterval.Duration
+}
+
 // Configuration holder
 type Configuration struct {
 	// Default cache to fallback on when none are redefined.
@@ -767,6 +775,12 @@ func parseConfiguration(cfg *Configuration, h *caddyfile.Dispenser, isGlobal boo
 				ttl, err := time.ParseDuration(args[0])
 				if err == nil {
 					cfg.DefaultCache.TTL.Duration = ttl
+				}
+			case "mapping_eviction_interval":
+				args := h.RemainingArgs()
+				mappingEvictionInterval, err := time.ParseDuration(args[0])
+				if err == nil {
+					cfg.DefaultCache.MappingEvictionInterval.Duration = mappingEvictionInterval
 				}
 			case "disable_coalescing":
 				cfg.DefaultCache.DisableCoalescing = true
