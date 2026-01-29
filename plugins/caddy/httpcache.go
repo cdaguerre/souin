@@ -192,6 +192,9 @@ func (s *SouinCaddyMiddleware) FromApp(app *SouinApp) error {
 	if dc.Stale.Duration == 0 {
 		s.Configuration.DefaultCache.Stale = appDc.Stale
 	}
+	if dc.MappingEvictionInterval.Duration == 0 {
+		s.Configuration.DefaultCache.MappingEvictionInterval = appDc.MappingEvictionInterval
+	}
 	if len(dc.Storers) == 0 {
 		s.Configuration.DefaultCache.Storers = appDc.Storers
 	}
