@@ -58,7 +58,7 @@ const (
 // evictionLockHolder is a unique identifier for this instance, used for distributed lock ownership.
 var evictionLockHolder = uuid.NewString()
 
-func tryAcquireEvictionLock(storer types.Storer) bool {
+func tryAcquireEvictionLock(logger core.Logger, storer types.Storer, lockTTL time.Duration) bool {
 	now := time.Now()
 	existing := storer.Get(evictionLockKey)
 
@@ -71,17 +71,23 @@ func tryAcquireEvictionLock(storer types.Storer) bool {
 			if err == nil && now.Before(lockedUntil) {
 				// Lock is still valid - check if we own it
 				if holderID == evictionLockHolder {
+					logger.Debugf("eviction lock already held by this instance (holder: %s, expires: %s)", holderID[:8], lockedUntil.Format(time.RFC3339))
 					return true
 				}
+				logger.Debugf("eviction lock held by another instance (holder: %s, expires in: %s)", holderID[:8], lockedUntil.Sub(now).Round(time.Second))
 				return false
 			}
+			logger.Debugf("eviction lock expired (was held by: %s, expired: %s ago)", holderID[:8], now.Sub(lockedUntil).Round(time.Second))
 		}
+	} else {
+		logger.Debugf("no existing eviction lock found")
 	}
 
 	// Lock expired or doesn't exist - attempt to claim it using optimistic locking
-	newLockExpiry := now.Add(evictionLockTTL)
+	newLockExpiry := now.Add(lockTTL)
 	lockValue := evictionLockHolder + "|" + newLockExpiry.Format(time.RFC3339)
-	if err := storer.Set(evictionLockKey, []byte(lockValue), evictionLockTTL); err != nil {
+	if err := storer.Set(evictionLockKey, []byte(lockValue), lockTTL); err != nil {
+		logger.Debugf("failed to set eviction lock: %v", err)
 		return false
 	}
 
@@ -89,15 +95,28 @@ func tryAcquireEvictionLock(storer types.Storer) bool {
 	// Another instance might have written between our check and set
 	time.Sleep(10 * time.Millisecond)
 	verifyValue := storer.Get(evictionLockKey)
-	return string(verifyValue) == lockValue
+	if string(verifyValue) == lockValue {
+		logger.Debugf("successfully acquired eviction lock (holder: %s, TTL: %s)", evictionLockHolder[:8], lockTTL)
+		return true
+	}
+	logger.Debugf("failed to acquire eviction lock (race condition, another instance won)")
+	return false
 }
 
 func registerMappingKeysEviction(logger core.Logger, storers []types.Storer, interval time.Duration) {
+	// Lock TTL is set to 2x the interval to ensure the lock outlives the eviction cycle,
+	// preventing concurrent evictions while allowing timely lock expiry if an instance crashes.
+	lockTTL := 2 * interval
+	retryDelay := interval / 2
+	if retryDelay < 10*time.Second {
+		retryDelay = 10 * time.Second
+	}
+
 	for _, storer := range storers {
 		logger.Debugf("registering mapping eviction for storer %s (interval: %s)", storer.Name(), interval)
 		go func(current types.Storer, currentInterval time.Duration) {
 			for {
-				if !tryAcquireEvictionLock(current) {
+				if !tryAcquireEvictionLock(logger, current, lockTTL) {
 					logger.Debugf("skipping mapping eviction for storer %s, another instance holds the lock", current.Name())
 					time.Sleep(currentInterval)
 
