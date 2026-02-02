@@ -95,7 +95,7 @@ func tryAcquireEvictionLock(logger core.Logger, storer types.Storer, lockTTL tim
 	// Attempt to claim the lock
 	newLockExpiry := now.Add(lockTTL)
 	lockValue := evictionLockHolder + "|" + newLockExpiry.Format(time.RFC3339)
-	logger.Debugf("attempting to set eviction lock (key: %s, value: %s, TTL: %s)", evictionLockKey, lockValue[:50], lockTTL)
+	logger.Debugf("attempting to set eviction lock (key: %s, value: %s, TTL: %s)", evictionLockKey, lockValue, lockTTL)
 	if err := storer.Set(evictionLockKey, []byte(lockValue), lockTTL); err != nil {
 		logger.Debugf("failed to set eviction lock: %v", err)
 		return false
