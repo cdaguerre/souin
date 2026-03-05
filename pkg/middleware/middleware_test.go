@@ -289,6 +289,104 @@ func TestCancelledRequestDoesNotCorruptCoalescedResponse(t *testing.T) {
 	}
 }
 
+// TestStaleWhileRevalidateBufferRace reproduces the race where the
+// stale-while-revalidate background goroutine is launched with a customWriter
+// that wraps bufPool, but ServeHTTP's deferred cleanup returns bufPool to the
+// pool before the goroutine finishes. A subsequent request can pick up the
+// same buffer from the pool and write to it concurrently with the goroutine.
+//
+// Run with -race to detect the data race.
+func TestStaleWhileRevalidateBufferRace(t *testing.T) {
+	handler, _ := newTestHandler(t)
+
+	const (
+		staleBody = "STALE_CACHED_BODY"
+		freshBody = "FRESHLY_VALIDATED_BODY"
+	)
+
+	var (
+		mu        sync.Mutex
+		callCount int
+	)
+
+	upstream := func(w http.ResponseWriter, r *http.Request) error {
+		mu.Lock()
+		n := callCount
+		callCount++
+		mu.Unlock()
+
+		if n == 0 {
+			// First call: respond immediately, mark as max-age=0 (immediately stale)
+			// stale-while-revalidate=60 means background revalidation is allowed.
+			w.Header().Set("Cache-Control", "max-age=0, stale-while-revalidate=60")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(staleBody))
+			return nil
+		}
+
+		// Revalidation call: slow, so the goroutine is still running when
+		// ServeHTTP returns, exercising any buffer pool race.
+		select {
+		case <-time.After(200 * time.Millisecond):
+		case <-r.Context().Done():
+			return r.Context().Err()
+		}
+		w.Header().Set("Cache-Control", "max-age=60")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(freshBody))
+		return nil
+	}
+
+	// First request: populate the cache.
+	req1 := httptest.NewRequest(http.MethodGet, "http://example.com/stale-reval-race", nil)
+	rec1 := httptest.NewRecorder()
+	if err := handler.ServeHTTP(rec1, req1, upstream); err != nil {
+		t.Fatalf("first request failed: %v", err)
+	}
+	if got := rec1.Body.String(); got != staleBody {
+		t.Fatalf("first request: want %q, got %q", staleBody, got)
+	}
+
+	// Second request: include max-stale so Souin will serve the stale entry
+	// and trigger background revalidation (max-age=0 means already stale).
+	req2 := httptest.NewRequest(http.MethodGet, "http://example.com/stale-reval-race", nil)
+	req2.Header.Set("Cache-Control", "max-stale")
+	rec2 := httptest.NewRecorder()
+	if err := handler.ServeHTTP(rec2, req2, upstream); err != nil {
+		t.Fatalf("second request failed: %v", err)
+	}
+	if got := rec2.Body.String(); got != staleBody {
+		t.Skipf("second request did not hit stale-while-revalidate path (got %q); skipping race check", got)
+	}
+
+	// Fire many concurrent requests immediately while the background
+	// revalidation goroutine is still running. In the old (buggy) code,
+	// each of these requests calls s.bufPool.Get(), and there is a chance
+	// that the pool returns the same bufPool that the goroutine is still
+	// writing to — a data race detectable with -race.
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodGet, "http://example.com/stale-reval-race-concurrent", nil)
+			rec := httptest.NewRecorder()
+			_ = handler.ServeHTTP(rec, req, upstream)
+		}(i)
+	}
+	wg.Wait()
+
+	// Wait for the background revalidation goroutine to finish and verify it ran.
+	time.Sleep(300 * time.Millisecond)
+
+	mu.Lock()
+	finalCallCount := callCount
+	mu.Unlock()
+	if finalCallCount < 2 {
+		t.Errorf("expected background revalidation to have run (callCount=%d, want >= 2)", finalCallCount)
+	}
+}
+
 // TestBufferBytesSliceCorruption is a focused unit test demonstrating the
 // underlying unsafe pattern: bytes.Buffer.Bytes() returns a slice alias
 // (not a copy) so returning the buffer to a sync.Pool invalidates the

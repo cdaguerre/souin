@@ -1014,13 +1014,16 @@ func (s *SouinBaseHandler) ServeHTTP(rw http.ResponseWriter, rq *http.Request, n
 						_, _ = io.Copy(b, response.Body)
 					})
 					_, err := customWriter.Send()
-					customWriter = NewCustomWriter(req, rw, bufPool)
+					// Allocate a dedicated buffer for the background revalidation goroutine.
+					// The outer defer returns bufPool when this function exits; reusing bufPool
+					// here would race with the goroutine still writing to it.
+					revalBuf := s.bufPool.Get().(*bytes.Buffer)
+					revalBuf.Reset()
+					revalWriter := NewCustomWriter(req, rw, revalBuf)
 					go func(v *core.Revalidator, goCw *CustomWriter, goRq *http.Request, goNext func(http.ResponseWriter, *http.Request) error, goCc *cacheobject.RequestCacheDirectives, goCk string, goUri string) {
+						defer s.bufPool.Put(revalBuf)
 						_ = s.Revalidate(v, goNext, goCw, goRq, goCc, goCk, goUri)
-					}(validator, customWriter, req, next, requestCc, cachedKey, uri)
-					buf := s.bufPool.Get().(*bytes.Buffer)
-					buf.Reset()
-					defer s.bufPool.Put(buf)
+					}(validator, revalWriter, req, next, requestCc, cachedKey, uri)
 
 					return err
 				}
@@ -1168,15 +1171,16 @@ func (s *SouinBaseHandler) ServeHTTP(rw http.ResponseWriter, rq *http.Request, n
 			return nil
 		}
 	case v := <-errorCacheCh:
-		// Goroutine has finished — safe to reclaim the buffer.
-		s.bufPool.Put(bufPool)
 		switch v {
 		case nil:
 			_, _ = customWriter.Send()
 		case Upstream50xError:
 			_, _ = customWriter.Send()
+			s.bufPool.Put(bufPool)
 			return nil
 		}
+		// Goroutine has finished and Send has consumed the buffer — safe to reclaim.
+		s.bufPool.Put(bufPool)
 		return v
 	}
 }
